@@ -1,22 +1,29 @@
-﻿"""Evaluation script.
+"""Evaluation script.
 
 Scopo del modulo
 ----------------
-Valuta il modello salvato da ml/train_model.py sul test set prodotto da ml/preprocessing.py.
+Verifica le performance del modello salvato da ml/train_model.py sul test set
+prodotto da ml/preprocessing.py.
 
 Input
 -----
 - models/churn_pipeline_v1.joblib
-- data/processed/test_raw.csv (colonna target "Churn Value" oppure "ChurnValue")
+- data/processed/test_raw.csv (colonna target "Churn Value")
 
 Output
 ------
 - outputs/metrics.csv: metriche riassuntive
 - outputs/classification_report.txt: report dettagliato per classe
-- outputs/confusion_matrix.png
-"""
+- plot matrice di confusione
 
-from __future__ import annotations
+Metriche
+--------
+- accuracy: accuratezza globale
+- precision: tra i predetti churn, quanti sono churn reali
+- recall: tra i churn reali, quanti ne intercetto
+- f1: armonica di precision e recall
+- roc_auc: qualita del ranking probabilistico (indipendente dalla soglia)
+"""
 
 from pathlib import Path
 
@@ -33,87 +40,58 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+# Setup path progetto
 ROOT = Path(__file__).resolve().parents[1]
 PROC_DIR = ROOT / "data" / "processed"
 MODELS_DIR = ROOT / "models"
 OUT_DIR = ROOT / "outputs"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Carico la pipeline completa (preprocessing + modello)
+pipeline = joblib.load(MODELS_DIR / "churn_pipeline_v1.joblib")
 
-def evaluate_model(
-    model_path: Path | str,
-    test_data_path: Path | str,
-    out_dir: Path | str,
-    plot_out_dir: Path | str,
-    target_col: str = "Churn Value",
-) -> dict:
-    """Valuta pipeline su test set e salva metriche/report/plot."""
+# Carico il test set già processato (stesse colonne/feature del train)
+df_test = pd.read_csv(PROC_DIR / "test_raw.csv")
+print(f"Test shape: {df_test.shape}")
 
-    model_path = Path(model_path)
-    test_data_path = Path(test_data_path)
-    out_dir = Path(out_dir)
-    plot_out_dir = Path(plot_out_dir)
+# Split X/y
+target_col = "Churn Value"
+X_test = df_test.drop(columns=[target_col])
+y_test = df_test[target_col]
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    plot_out_dir.mkdir(parents=True, exist_ok=True)
+# Predizioni
+# - preds: classi (0/1) usando la logica del modello (tipicamente soglia 0.5)
+# - proba: probabilità della classe positiva (churn)
+preds = pipeline.predict(X_test)
+proba = pipeline.predict_proba(X_test)[:, 1]
 
-    pipeline = joblib.load(model_path)
-    df_test = pd.read_csv(test_data_path)
+# Calcolo metriche
+metrics = {
+    "accuracy": accuracy_score(y_test, preds),
+    "precision": precision_score(y_test, preds, zero_division=0),
+    "recall": recall_score(y_test, preds, zero_division=0),
+    "f1": f1_score(y_test, preds, zero_division=0),
+    "roc_auc": roc_auc_score(y_test, proba),
+}
 
-    # fallback robusto tra schema con/senza spazi
-    if target_col not in df_test.columns:
-        fallback = "ChurnValue" if target_col == "Churn Value" else "Churn Value"
-        if fallback in df_test.columns:
-            target_col = fallback
-        else:
-            raise KeyError(f"target_col '{target_col}' not found in test data columns")
+# Print rapidi per verifica manuale
+print(f"Recall: {metrics['recall']:.2f}")
+print(f"Accuracy: {metrics['accuracy']:.2f}")
+print(f"Precision: {metrics['precision']:.2f}")
+print(f"F1-score: {metrics['f1']:.2f}")
+print(f"ROC-AUC: {metrics['roc_auc']:.2f}")
 
-    print(f"Test shape: {df_test.shape}")
+# Salvo metriche su CSV (comodo per dashboard o tracking)
+pd.DataFrame([metrics]).to_csv(OUT_DIR / "metrics.csv", index=False)
+print(f"Saved metrics to: {OUT_DIR / 'metrics.csv'}")
 
-    X_test = df_test.drop(columns=[target_col])
-    y_test = df_test[target_col]
+# Report più dettagliato per classe
+report = classification_report(y_test, preds, digits=4, zero_division=0)
+(OUT_DIR / "classification_report.txt").write_text(report, encoding="utf-8")
 
-    preds = pipeline.predict(X_test)
-    proba = pipeline.predict_proba(X_test)[:, 1]
-
-    metrics = {
-        "accuracy": accuracy_score(y_test, preds),
-        "precision": precision_score(y_test, preds, zero_division=0),
-        "recall": recall_score(y_test, preds, zero_division=0),
-        "f1": f1_score(y_test, preds, zero_division=0),
-        "roc_auc": roc_auc_score(y_test, proba),
-    }
-
-    pd.DataFrame([metrics]).to_csv(out_dir / "metrics.csv", index=False)
-
-    report = classification_report(y_test, preds, digits=4, zero_division=0)
-    (out_dir / "classification_report.txt").write_text(report, encoding="utf-8")
-
-    ConfusionMatrixDisplay.from_estimator(pipeline, X_test, y_test)
-    plt.title("Matrice di Confusione - Errori del modello")
-    plt.tight_layout()
-    plt.savefig(plot_out_dir / "confusion_matrix.png")
-    plt.close()
-
-    return metrics
-
-
-def main() -> None:
-    metrics = evaluate_model(
-        model_path=MODELS_DIR / "churn_pipeline_v1.joblib",
-        test_data_path=PROC_DIR / "test_raw.csv",
-        out_dir=OUT_DIR,
-        plot_out_dir=OUT_DIR,
-        target_col="Churn Value",
-    )
-
-    print(f"Recall: {metrics['recall']:.2f}")
-    print(f"Accuracy: {metrics['accuracy']:.2f}")
-    print(f"Precision: {metrics['precision']:.2f}")
-    print(f"F1-score: {metrics['f1']:.2f}")
-    print(f"ROC-AUC: {metrics['roc_auc']:.2f}")
-    print(f"Saved metrics to: {OUT_DIR / 'metrics.csv'}")
-
-
-if __name__ == "__main__":
-    main()
+# Matrice di confusione: mostra FP/FN in modo immediato
+ConfusionMatrixDisplay.from_estimator(pipeline, X_test, y_test)
+plt.title("Matrice di Confusione - Errori del modello")
+#plt.show()
+plt.savefig(MODELS_DIR / "confusion_matrix.png")
+plt.close()
