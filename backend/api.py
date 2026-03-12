@@ -84,7 +84,7 @@ def trigger_training(n_trials: int = 50):
         model_path = ml.train_model.run_training_pipeline(
             train_data_path=ml.train_model.PROC_DIR / "train_raw.csv",
             models_dir=ml.train_model.MODELS_DIR,
-            target_col="ChurnValue",
+            target_col="Churn Value",
             n_trials=n_trials,
         )
         return {"status": "success", "model_path": model_path}
@@ -100,7 +100,7 @@ def trigger_evaluation():
             test_data_path=ml.evaluate.PROC_DIR / "test_raw.csv",
             out_dir=ml.evaluate.OUT_DIR,
             plot_out_dir=ml.evaluate.OUT_DIR,
-            target_col="ChurnValue",
+            target_col="Churn Value",
         )
         return {"status": "success", "metrics": metrics}
     except Exception as e:

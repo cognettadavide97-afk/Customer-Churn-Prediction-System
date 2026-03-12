@@ -366,35 +366,50 @@ def plot_churn_heatmap_grid(df, output_path):
     plt.ylabel("Costi Mensili ($)", fontsize=12)
     plt.savefig(output_path / "Churn_Heatmap_Grid.png", dpi=300, bbox_inches='tight')
     plt.close()
+
+
+def generate_all_plots(root_path: Path | None = None) -> Path:
+    """Orchestra la generazione di tutti i grafici di analisi.
+
+    Questa funzione centralizza la logica operativa, così il modulo
+    può essere importato senza eseguire side-effect automatici.
+    """
+
+    root = root_path if root_path is not None else Path(__file__).resolve().parents[1]
+    proc_dir = root / "data" / "processed"
+    raw_file = root / "data" / "raw" / "Telco_customer_churn.csv"
+    out_dir = root / "outputs" / "plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Base analisi post-elaborazione (train+test processed).
+    df_train = pd.read_csv(proc_dir / "train_raw.csv")
+    df_test = pd.read_csv(proc_dir / "test_raw.csv")
+    df = harmonize_columns(pd.concat([df_train, df_test], axis=0, ignore_index=True))
+
+    # Dati raw usati per la mappa geografica (Latitude/Longitude).
+    raw_df = harmonize_columns(pd.read_csv(raw_file))
+
+    # Generazione sequenziale dei plot principali.
+    plot_churn_distribution(df, out_dir)
+    plot_contract_churn(df, out_dir)
+    plot_tenure_group_rate(df, out_dir)
+    plot_scatter_tenure_charges(df, out_dir)
+    plot_churn_heatmap_grid(df, out_dir)
+    plot_tenure_kde(df, out_dir)
+    plot_monthly_charges_kde(df, out_dir)
+    plot_services_and_payment(df, out_dir)
+    plot_map_distribution(raw_df, out_dir)
+    plot_num_services_count(df, out_dir)
+    plot_full_correlation_matrix(df, out_dir)
+    plot_demographic_analysis(df, out_dir)
+    plot_economic_value_dist(df, out_dir)
+    plot_charges_per_service_analysis(df, out_dir)
+    plot_outliers_boxplots(df, out_dir)
+    export_chart_comments(out_dir)
+
+    return out_dir
+
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # Setup percorsi
-    ROOT = Path(__file__).resolve().parents[1]
-    PROC_DIR = ROOT / "data" / "processed"
-    RAW_FILE = ROOT / "data" / "raw" / "Telco_customer_churn.csv"
-    OUT_DIR = ROOT / "outputs" / "plots"
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # Base analisi post-elaborazione (train+test processed)
-    df_train = pd.read_csv(PROC_DIR / "train_raw.csv")
-    df_test = pd.read_csv(PROC_DIR / "test_raw.csv")
-    df = harmonize_columns(pd.concat([df_train, df_test], axis=0, ignore_index=True))
-    # Dati raw solo per mappa geografica (Latitude/Longitude)
-    raw_df = harmonize_columns(pd.read_csv(RAW_FILE))
-    # Chiamata a tutte le funzioni
-    plot_churn_distribution(df, OUT_DIR)
-    plot_contract_churn(df, OUT_DIR)
-    plot_tenure_group_rate(df, OUT_DIR)
-    plot_scatter_tenure_charges(df, OUT_DIR)
-    plot_churn_heatmap_grid(df, OUT_DIR)
-    plot_tenure_kde(df, OUT_DIR)
-    plot_monthly_charges_kde(df, OUT_DIR)
-    plot_services_and_payment(df, OUT_DIR)
-    plot_map_distribution(raw_df, OUT_DIR)
-    plot_num_services_count(df, OUT_DIR)
-    plot_full_correlation_matrix(df, OUT_DIR)
-    plot_demographic_analysis(df, OUT_DIR)
-    plot_economic_value_dist(df, OUT_DIR)
-    plot_charges_per_service_analysis(df, OUT_DIR)
-    plot_outliers_boxplots(df, OUT_DIR)
-    export_chart_comments(OUT_DIR)
-    print(f"Analisi completata. Grafici salvati in: {OUT_DIR}")
+    out_dir = generate_all_plots()
+    print(f"Analisi completata. Grafici salvati in: {out_dir}")
