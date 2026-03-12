@@ -54,7 +54,7 @@ people**.
 
     outputs/
        metrics.csv
-       predictions.csv
+       classification_report.txt
        plots/
           churn_distribution.png
           tenure_churn.png
@@ -142,7 +142,7 @@ ml/predict.py
 ### Responsibilities
 
 -   Build ML pipeline
--   Train RandomForest model
+-   Train XGBoost model tuned with Optuna (F2-oriented)
 -   Evaluate model performance
 -   Save trained model
 -   Implement prediction functions
@@ -151,7 +151,7 @@ ml/predict.py
 
 models/churn_pipeline_v1.joblib\
 outputs/metrics.csv\
-outputs/predictions.csv
+outputs/classification_report.txt
 
 ------------------------------------------------------------------------
 
@@ -161,17 +161,18 @@ outputs/predictions.csv
 
 backend/api.py
 
-Endpoints POST /predict\
-POST /predict_batch\
-GET /results\
-GET /download_results
+Endpoints GET /\
+POST /predict\
+POST /preprocess\
+POST /train\
+POST /evaluate\
+POST /generate-plots
 
 ### Frontend
 
 frontend/dashboard.py
 
-Features - Single prediction - Batch prediction via CSV - Visualization
-of churn probability - Download predictions
+Features - Single prediction via API - Visualization support for churn probability - ML pipeline trigger from backend endpoints
 
 ------------------------------------------------------------------------
 
@@ -191,6 +192,14 @@ analysis/plots.py
 ### Charts
 
 outputs/plots/
+
+------------------------------------------------------------------------
+
+
+# Project Guides (canonical)
+
+- `docs/ARCHITETTURA_GUIDA.md` (architettura tecnica aggiornata)
+- `docs/RUNBOOK.md` (comandi operativi, test minimi, quality gate, e2e ridotto)
 
 ------------------------------------------------------------------------
 
@@ -223,7 +232,47 @@ python ml/evaluate.py
 
 Generate plots
 
-python analysis/plots.py
+python -m analysis.plots
+
+
+------------------------------------------------------------------------
+
+# Canonical Documentation
+
+Use these two files as the single source of truth:
+
+- docs/ARCHITETTURA_GUIDA.md
+- docs/RUNBOOK.md
+
+------------------------------------------------------------------------
+
+# Minimal checks
+
+
+Minimal checks (optional toggle true/false in code)
+
+python - <<'PY'
+import ml.train_model as tm
+import ml.evaluate as ev
+import ml.predict as pr
+
+# training: verifica contratto preprocessing (schema+shape)
+tm.run_minimal_tests()
+# evaluate: verifica metriche chiave presenti nei report
+ev.run_minimal_tests()
+# predict: verifica output minimo + controllo soglia invalida
+pr.run_minimal_tests()
+print("Minimal checks passed")
+
+
+# quality gate regressione modello (soglie recall/f1/auc)
+import ml.evaluate as ev
+print(ev.run_quality_regression_test())
+PY
+
+
+# reduced end-to-end integration test
+python scripts/run_reduced_e2e_test.py
 
 ------------------------------------------------------------------------
 
@@ -244,7 +293,7 @@ streamlit run frontend/dashboard.py
 models/ churn_pipeline_v1.joblib
 
 outputs/ metrics.csv\
-predictions.csv\
+classification_report.txt\
 plots/
 
 ------------------------------------------------------------------------
@@ -254,6 +303,8 @@ plots/
 Python 3.12\
 Pandas\
 Scikit-learn\
+XGBoost\
+Optuna\
 FastAPI\
 Streamlit\
 Matplotlib\

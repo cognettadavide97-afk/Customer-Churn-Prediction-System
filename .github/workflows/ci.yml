@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  minimal-and-integration-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run minimal checks
+        run: |
+          python - <<'PY'
+          import ml.train_model as tm
+          import ml.evaluate as ev
+          import ml.predict as pr
+
+          tm.run_minimal_tests()
+          ev.run_minimal_tests()
+          pr.run_minimal_tests()
+          print('minimal_checks_passed')
+          PY
+
+      - name: Run model quality regression gate
+        run: |
+          python - <<'PY'
+          import ml.evaluate as ev
+          print(ev.run_quality_regression_test())
+          print('quality_gate_passed')
+          PY
+
+      - name: Run reduced end-to-end integration test
+        run: |
+          python scripts/run_reduced_e2e_test.py
