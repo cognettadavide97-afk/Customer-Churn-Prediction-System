@@ -8,21 +8,14 @@ prodotto da ml/preprocessing.py.
 Input
 -----
 - models/churn_pipeline_v1.joblib
+- models/churn_ensemble_v1.joblib (opzionale)
 - data/processed/test_raw.csv (colonna target "Churn Value")
 
 Output
 ------
-- outputs/metrics.csv: metriche riassuntive
+- outputs/metrics.csv: metriche riassuntive (base + ensemble se disponibile)
 - outputs/classification_report.txt: report dettagliato per classe
-- plot matrice di confusione
-
-Metriche
---------
-- accuracy: accuratezza globale
-- precision: tra i predetti churn, quanti sono churn reali
-- recall: tra i churn reali, quanti ne intercetto
-- f1: armonica di precision e recall
-- roc_auc: qualita del ranking probabilistico (indipendente dalla soglia)
+- outputs/confusion_matrix_xgb.png e outputs/confusion_matrix_ensemble.png
 """
 
 from pathlib import Path
@@ -47,51 +40,82 @@ MODELS_DIR = ROOT / "models"
 OUT_DIR = ROOT / "outputs"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Carico la pipeline completa (preprocessing + modello)
+# Carico artifacts
 pipeline = joblib.load(MODELS_DIR / "churn_pipeline_v1.joblib")
+ensemble_path = MODELS_DIR / "churn_ensemble_v1.joblib"
+ensemble_artifacts = joblib.load(ensemble_path) if ensemble_path.exists() else None
+if ensemble_artifacts is None:
+    print("[evaluate] Ensemble artifact non trovato: valuto solo XGBoost base.")
+else:
+    print(f"[evaluate] Loaded ensemble artifact: {ensemble_path}")
 
-# Carico il test set già processato (stesse colonne/feature del train)
+# Carico test set
 df_test = pd.read_csv(PROC_DIR / "test_raw.csv")
 print(f"Test shape: {df_test.shape}")
 
-# Split X/y
 target_col = "Churn Value"
 X_test = df_test.drop(columns=[target_col])
 y_test = df_test[target_col]
 
-# Predizioni
-# - preds: classi (0/1) usando la logica del modello (tipicamente soglia 0.5)
-# - proba: probabilità della classe positiva (churn)
-preds = pipeline.predict(X_test)
-proba = pipeline.predict_proba(X_test)[:, 1]
 
-# Calcolo metriche
-metrics = {
-    "accuracy": accuracy_score(y_test, preds),
-    "precision": precision_score(y_test, preds, zero_division=0),
-    "recall": recall_score(y_test, preds, zero_division=0),
-    "f1": f1_score(y_test, preds, zero_division=0),
-    "roc_auc": roc_auc_score(y_test, proba),
-}
+def _compute_metrics(y_true, preds, proba) -> dict:
+    return {
+        "accuracy": accuracy_score(y_true, preds),
+        "precision": precision_score(y_true, preds, zero_division=0),
+        "recall": recall_score(y_true, preds, zero_division=0),
+        "f1": f1_score(y_true, preds, zero_division=0),
+        "roc_auc": roc_auc_score(y_true, proba),
+    }
 
-# Print rapidi per verifica manuale
-print(f"Recall: {metrics['recall']:.2f}")
-print(f"Accuracy: {metrics['accuracy']:.2f}")
-print(f"Precision: {metrics['precision']:.2f}")
-print(f"F1-score: {metrics['f1']:.2f}")
-print(f"ROC-AUC: {metrics['roc_auc']:.2f}")
 
-# Salvo metriche su CSV (comodo per dashboard o tracking)
-pd.DataFrame([metrics]).to_csv(OUT_DIR / "metrics.csv", index=False)
-print(f"Saved metrics to: {OUT_DIR / 'metrics.csv'}")
+# ===== Modello base XGBoost =====
+preds_xgb = pipeline.predict(X_test)
+proba_xgb = pipeline.predict_proba(X_test)[:, 1]
+metrics_xgb = _compute_metrics(y_test, preds_xgb, proba_xgb)
+metrics_xgb["model"] = "xgb_pipeline"
 
-# Report più dettagliato per classe
-report = classification_report(y_test, preds, digits=4, zero_division=0)
-(OUT_DIR / "classification_report.txt").write_text(report, encoding="utf-8")
+print("\n=== Metrics: XGBoost pipeline ===")
+for k, v in metrics_xgb.items():
+    if k != "model":
+        print(f"{k}: {v:.4f}")
 
-# Matrice di confusione: mostra FP/FN in modo immediato
-ConfusionMatrixDisplay.from_estimator(pipeline, X_test, y_test)
-plt.title("Matrice di Confusione - Errori del modello")
-#plt.show()
-plt.savefig(MODELS_DIR / "confusion_matrix.png")
+# ===== Ensemble stacking (se presente) =====
+metrics_rows = [metrics_xgb]
+report_text = "=== XGBoost pipeline ===\n"
+report_text += classification_report(y_test, preds_xgb, digits=4, zero_division=0)
+
+ConfusionMatrixDisplay.from_predictions(y_test, preds_xgb)
+plt.title("Matrice di Confusione - XGBoost pipeline")
+plt.tight_layout()
+plt.savefig(OUT_DIR / "confusion_matrix_xgb.png")
 plt.close()
+
+if ensemble_artifacts is not None:
+    stack_classifier = ensemble_artifacts["stack_classifier"]
+    proba_ens = stack_classifier.predict_proba(X_test)[:, 1]
+    preds_ens = (proba_ens >= 0.5).astype(int)
+
+    metrics_ens = _compute_metrics(y_test, preds_ens, proba_ens)
+    metrics_ens["model"] = "stacking_xgb_cat"
+    metrics_rows.append(metrics_ens)
+
+    print("\n=== Metrics: Stacking ensemble (XGBoost + CatBoost) ===")
+    for k, v in metrics_ens.items():
+        if k != "model":
+            print(f"{k}: {v:.4f}")
+
+    report_text += "\n\n=== Stacking ensemble (XGBoost + CatBoost) ===\n"
+    report_text += classification_report(y_test, preds_ens, digits=4, zero_division=0)
+
+    ConfusionMatrixDisplay.from_predictions(y_test, preds_ens)
+    plt.title("Matrice di Confusione - Stacking ensemble")
+    plt.tight_layout()
+    plt.savefig(OUT_DIR / "confusion_matrix_ensemble.png")
+    plt.close()
+
+# Salvataggi output
+pd.DataFrame(metrics_rows).to_csv(OUT_DIR / "metrics.csv", index=False)
+(OUT_DIR / "classification_report.txt").write_text(report_text, encoding="utf-8")
+
+print(f"\nSaved metrics to: {OUT_DIR / 'metrics.csv'}")
+print(f"Saved report to: {OUT_DIR / 'classification_report.txt'}")

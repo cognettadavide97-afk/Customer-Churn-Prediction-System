@@ -19,7 +19,8 @@ Input attesi
 
 Output prodotti
 --------------
-- models/churn_pipeline_v1.joblib: pipeline addestrata, usata da evaluate.py e predict.py
+- models/churn_pipeline_v1.joblib: pipeline XGBoost addestrata, usata da evaluate.py e predict.py
+- models/churn_ensemble_v1.joblib: artifact con XGBoost + CatBoost + stacking classifier (LogisticRegression finale)
 
 Concetti chiave
 ---------------
@@ -40,12 +41,15 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import StackingClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score, learning_curve, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
+from catboost import CatBoostClassifier
 
 
 def tune_xgb_with_optuna(
@@ -103,6 +107,130 @@ def _metrics(y_true, y_pred, y_prob):
         "f1": f1_score(y_true, y_pred, zero_division=0),
         "roc_auc": roc_auc_score(y_true, y_prob),
     }
+
+
+def _build_catboost_model(scale_pos_weight: float, random_state: int = 42) -> CatBoostClassifier:
+    """Costruisce un CatBoostClassifier con parametri stabili/clonabili."""
+
+    class_weights = (1.0, float(scale_pos_weight)) if scale_pos_weight > 0 else (1.0, 1.0)
+    return CatBoostClassifier(
+        loss_function="Logloss",
+        eval_metric="F1",
+        random_seed=random_state,
+        iterations=500,
+        learning_rate=0.05,
+        depth=6,
+        class_weights=class_weights,
+        verbose=False,
+    )
+
+
+def train_catboost_pipeline(
+    X: pd.DataFrame,
+    y: pd.Series,
+    preprocessor: ColumnTransformer,
+    scale_pos_weight: float,
+    random_state: int = 42,
+) -> Pipeline:
+    """Allena un secondo modello predittivo con CatBoost dentro una Pipeline sklearn."""
+
+    cat_model = _build_catboost_model(scale_pos_weight=scale_pos_weight, random_state=random_state)
+
+    cat_pipeline = Pipeline(
+        [
+            ("preprocessor", clone(preprocessor)),
+            ("model", cat_model),
+        ]
+    )
+    cat_pipeline.fit(X, y)
+    return cat_pipeline
+
+
+def train_sklearn_stacking_classifier_ensemble(
+    X: pd.DataFrame,
+    y: pd.Series,
+    preprocessor: ColumnTransformer,
+    scale_pos_weight: float,
+    xgb_params: dict,
+    random_state: int = 42,
+) -> StackingClassifier:
+    """Allena un ensemble con sklearn StackingClassifier usando XGBoost e CatBoost."""
+
+    xgb_estimator = Pipeline(
+        [
+            ("preprocessor", clone(preprocessor)),
+            ("model", XGBClassifier(**xgb_params)),
+        ]
+    )
+
+    cat_estimator = Pipeline(
+        [
+            ("preprocessor", clone(preprocessor)),
+            ("model", _build_catboost_model(scale_pos_weight=scale_pos_weight, random_state=random_state)),
+        ]
+    )
+
+    stack_clf = StackingClassifier(
+        estimators=[("xgb", xgb_estimator), ("cat", cat_estimator)],
+        final_estimator=LogisticRegression(max_iter=1000),
+        cv=5,
+        n_jobs=-1,
+        passthrough=False,
+        stack_method="predict_proba",
+    )
+
+    stack_clf.fit(X, y)
+    return stack_clf
+
+
+def train_xgb_catboost_linear_ensemble(
+    X: pd.DataFrame,
+    y: pd.Series,
+    xgb_pipeline: Pipeline,
+    preprocessor: ColumnTransformer,
+    scale_pos_weight: float,
+    model_params: dict,
+    random_state: int = 42,
+) -> dict:
+    """Allena l'ensemble con StackingClassifier e restituisce i componenti fitted."""
+
+    xgb_fitted = clone(xgb_pipeline)
+    xgb_fitted.fit(X, y)
+
+    cat_fitted = train_catboost_pipeline(
+        X=X,
+        y=y,
+        preprocessor=preprocessor,
+        scale_pos_weight=scale_pos_weight,
+        random_state=random_state,
+    )
+
+    stack_classifier = train_sklearn_stacking_classifier_ensemble(
+        X=X,
+        y=y,
+        preprocessor=preprocessor,
+        scale_pos_weight=scale_pos_weight,
+        xgb_params=model_params,
+        random_state=random_state,
+    )
+
+    return {
+        "xgb_pipeline": xgb_fitted,
+        "cat_pipeline": cat_fitted,
+        "stack_classifier": stack_classifier,
+    }
+
+
+def predict_with_linear_ensemble(
+    stack_classifier: StackingClassifier,
+    X: pd.DataFrame,
+    threshold: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Predice probabilità e classi usando StackingClassifier (XGBoost + CatBoost)."""
+
+    ensemble_prob = stack_classifier.predict_proba(X)[:, 1]
+    ensemble_pred = (ensemble_prob >= threshold).astype(int)
+    return ensemble_prob, ensemble_pred
 
 
 # ------------------------------
@@ -239,6 +367,27 @@ pipeline = Pipeline(
 # così la pipeline salvata è davvero fitted e riutilizzabile
 pipeline.fit(X_raw, y_raw)
 
+# ------------------------------
+# 6-bis) Training ensemble XGBoost + CatBoost + LogisticRegression
+# ------------------------------
+ensemble_artifacts = train_xgb_catboost_linear_ensemble(
+    X=X_raw,
+    y=y_raw,
+    xgb_pipeline=pipeline,
+    preprocessor=preprocessor,
+    scale_pos_weight=scale_pos_weight,
+    model_params=model_params,
+    random_state=42,
+)
+
+ensemble_prob_train, ensemble_pred_train = predict_with_linear_ensemble(
+    stack_classifier=ensemble_artifacts["stack_classifier"],
+    X=X_raw,
+)
+ensemble_f1_train = f1_score(y_raw, ensemble_pred_train, zero_division=0)
+ensemble_auc_train = roc_auc_score(y_raw, ensemble_prob_train)
+print(f"Ensemble train F1: {ensemble_f1_train:.4f} | AUC: {ensemble_auc_train:.4f}")
+
 
 # ------------------------------
 # Overfitting diagnostics
@@ -303,9 +452,12 @@ plt.close()
 # 7) Salvataggio artifact
 # ------------------------------
 model_path = MODELS_DIR / "churn_pipeline_v1.joblib"
+ensemble_path = MODELS_DIR / "churn_ensemble_v1.joblib"
 joblib.dump(pipeline, model_path)
+joblib.dump(ensemble_artifacts, ensemble_path)
 print("Pipeline addestrata e salvata correttamente.")
 print(f"Model saved to: {model_path}")
+print(f"Ensemble saved to: {ensemble_path}")
 
 
 # ------------------------------
