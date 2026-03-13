@@ -17,7 +17,7 @@ from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, f1_score, fbeta_score, make_scorer, precision_score, recall_score, roc_auc_score
-from sklearn.model_selection import StratifiedKFold, cross_val_score, learning_curve, train_test_split
+from sklearn.model_selection import StratifiedKFold, cross_validate, learning_curve, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
@@ -66,27 +66,60 @@ def tune_xgb_with_optuna(
         # Iperparametri candidati per trovare il miglior compromesso bias/variance.
         # Il range è volutamente conservativo per evitare modelli troppo instabili
         # in produzione (focus: generalizzazione + robustezza operativa).
+        # Search space pensato per ridurre overfitting senza deprimere recall:
+        # - max_depth più contenuto evita alberi troppo specifici del train
+        # - min_child_weight/gamma aumentano la soglia minima di split
+        # - reg_alpha/reg_lambda aggiungono penalizzazione L1/L2
+        # - subsample/colsample_bytree introducono bagging/feature sampling
         trial_params = {
-            "n_estimators": trial.suggest_int("n_estimators", 200, 800),
-            "max_depth": trial.suggest_int("max_depth", 2, 8),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 650),
+            "max_depth": trial.suggest_int("max_depth", 2, 6),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.7, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 3, 15),
+            "gamma": trial.suggest_float("gamma", 0.0, 3.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 3.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 30.0, log=True),
         }
 
         # Ogni trial allena l'intera pipeline (preprocess + modello), così
         # la metrica riflette il comportamento reale end-to-end.
         model = XGBClassifier(**{**base_params, **trial_params})
         pipeline = Pipeline([("preprocessor", preprocessor), ("model", model)])
-        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=random_state)
+        cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=random_state)
         f2_scorer = make_scorer(fbeta_score, beta=2)
-        scores = cross_val_score(pipeline, X, y, scoring=f2_scorer, cv=cv, n_jobs=-1)
-        return float(scores.mean())
+        # return_train_score=True è intenzionale: serve per stimare gap train-test
+        # direttamente nella funzione obiettivo e scoraggiare trial overfittati.
+        cv_res = cross_validate(
+            pipeline,
+            X,
+            y,
+            scoring={"f2": f2_scorer, "roc_auc": "roc_auc"},
+            cv=cv,
+            n_jobs=-1,
+            return_train_score=True,
+        )
+
+        mean_f2 = float(np.mean(cv_res["test_f2"]))
+        mean_auc = float(np.mean(cv_res["test_roc_auc"]))
+        overfit_gap = max(0.0, float(np.mean(cv_res["train_f2"]) - mean_f2))
+
+        # Obiettivo bilanciato: massimizza capacità di intercettazione churn
+        # penalizzando gap train/test (generalizzazione).
+        # Peso business-oriented:
+        # - F2 (75%): priorità intercettare churner (recall)
+        # - AUC (25%): stabilità del ranking probabilistico
+        # - penalità gap (10%): evita soluzioni con train score gonfiato
+        return (0.75 * mean_f2) + (0.25 * mean_auc) - (0.10 * overfit_gap)
 
     # Pruner per ridurre costo computazionale interrompendo trial deboli.
-    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner(n_warmup_steps=5))
+    # Sampler seedato: rende la ricerca Optuna riproducibile tra run nello stesso ambiente.
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=random_state),
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
+    )
     study.optimize(objective, n_trials=n_trials)
     return study.best_params
 
@@ -162,6 +195,17 @@ def save_diagnostics(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series, models_d
     plt.savefig(models_dir / "overfitting_train_vs_test.png")
     plt.close()
 
+    # Report numerico complementare al grafico:
+    # utile in PR/CI per verificare rapidamente quanto è ampio il gap.
+    pd.DataFrame(
+        {
+            "metric": labels,
+            "train": [m_tr[k] for k in labels],
+            "test": [m_te[k] for k in labels],
+            "gap_train_minus_test": [m_tr[k] - m_te[k] for k in labels],
+        }
+    ).to_csv(models_dir / "overfitting_report.csv", index=False)
+
     # 2) Learning curve: andamento F1 al crescere dei dati.
     train_sizes, train_scores, test_scores = learning_curve(
         clone(pipeline),
@@ -208,7 +252,7 @@ def run_training_pipeline(
     train_data_path: Path | str | None = None,
     models_dir: Path | str | None = None,
     target_col: str = TARGET_COL,
-    n_trials: int = 50,
+    n_trials: int = 24,
     random_state: int = 42,
 ) -> str:
     """Esegue il training completo e salva gli artifact principali.
@@ -255,6 +299,8 @@ def run_training_pipeline(
         "random_state": random_state,
         "n_jobs": -1,
         "scale_pos_weight": scale_pos_weight,
+        # max_delta_step stabilizza update con classe sbilanciata
+        # (evita salti troppo aggressivi nei log-odds della classe positiva).
         "max_delta_step": 1,
     }
     model_params.update(best_params)
@@ -273,6 +319,7 @@ def run_training_pipeline(
 
     best_iteration = getattr(model_es, "best_iteration", None)
     if best_iteration is not None:
+        # best_iteration è 0-indexed: +1 per ottenere il numero reale di alberi.
         model_params["n_estimators"] = int(best_iteration) + 1
 
     # 5) Fit finale del modello base su tutto il training set.

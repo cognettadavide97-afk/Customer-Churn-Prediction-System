@@ -46,6 +46,11 @@ PY
 python scripts/run_reduced_e2e_test.py
 ```
 
+## 6b) Check coerenza confusion matrix (XGBoost)
+```bash
+python scripts/check_confusion_matrix_consistency.py
+```
+
 ## 7) API
 ```bash
 uvicorn backend.api:app --reload

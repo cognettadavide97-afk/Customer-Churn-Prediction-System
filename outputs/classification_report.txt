@@ -1,20 +1,9 @@
 === XGBoost pipeline ===
               precision    recall  f1-score   support
 
-           0     0.9146    0.7471    0.8224      1032
-           1     0.5323    0.8049    0.6408       369
+           0     0.9177    0.7452    0.8225      1032
+           1     0.5329    0.8130    0.6438       369
 
-    accuracy                         0.7623      1401
-   macro avg     0.7234    0.7760    0.7316      1401
-weighted avg     0.8139    0.7623    0.7746      1401
-
-
-=== Stacking ensemble (XGBoost + CatBoost) ===
-              precision    recall  f1-score   support
-
-           0     0.8598    0.8798    0.8697      1032
-           1     0.6406    0.5989    0.6190       369
-
-    accuracy                         0.8059      1401
-   macro avg     0.7502    0.7394    0.7444      1401
-weighted avg     0.8021    0.8059    0.8037      1401
+    accuracy                         0.7630      1401
+   macro avg     0.7253    0.7791    0.7331      1401
+weighted avg     0.8163    0.7630    0.7754      1401
